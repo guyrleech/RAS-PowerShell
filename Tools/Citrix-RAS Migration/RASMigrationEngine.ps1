@@ -1,39 +1,54 @@
 . "./Utilities.ps1"
 <#
 .SYNOPSIS
-XenApp to RAS migration script module.
+Citrix Virtual Apps and Desktops to RAS migration engine.
 
 .DESCRIPTION
-This is a migration script to transfer XA -Applications, -Workergroups, -Zones, -Servers.
-!!IMPORTANT
-At the time of writing the script, BY DEFAULT, the first Zone name (in zones xml) will be used as the default RASSite name.
-Due to difference in software architechture it is not possible to do a 1:1 mapping.
+This is a migration script to transfer Citrix Virtual Apps and Desktops -Applications.
 
 .EXAMPLE
 # Import the script
-. "./CitrixMigrate.ps1"
-
-# Database schema is created, XMLs are parsed and inserted into the database.
-$db = ParseXMLtoDB -zonesXmlPath "./XmlMock/zones.xml" -serversXmlPath "./XmlMock/servers.xml" -workgroupXmlPath "./XmlMock/workergroups.xml" -applicationXmlPath "./XmlMock/applications.xml"
-# Generate script.
-InitializeScript -appendToMain {
-	MigrateSites($db)
-	MigrateServers($db)
-	MigrateGroups($db)
-	MigrateFolders($db)
-	MigrateApplications($db)
-	WriteToScript "Remove-RASSession"
-}
+. "./PrepareImport.ps1"
 
 .NOTES
 General notes
 Utilities.ps1 is required to operate this script!
 #>
 
+## when using clixml via import-clixml we don't get a reference id so create a script wide unique one
+[int]$script:refID = 0
+
 $PSAdminModule = "RASAdmin"
-if($(Get-Module -ListAvailable).Name.Contains("PSAdmin"))
+if($(Get-Module -ListAvailable -Verbose:$false -Debug:$false).Name.Contains("PSAdmin"))
 {
 	$PSAdminModule = "PSAdmin"
+}
+
+function Get-Hash
+{
+    ## Modified from https://xpertkb.com/compute-hash-string-powershell/ as MD5 in original not FIPS compliant
+
+    Param
+    (
+        [Parameter(Mandatory=$true,HelpMessage='Bytes to hash')]
+        [object]$BytesToHash
+    )
+
+    [string]$result = $null
+    if($null -ne $BytesToHash)
+    {
+        $hasher = $null
+        $hasher = New-Object -TypeName System.Security.Cryptography.SHA256CryptoServiceProvider
+        if( $hasher )
+        {
+            $hashByteArray = $hasher.ComputeHash( $BytesToHash )
+            foreach( $byte in $hashByteArray )
+            {
+              $result = "$result{0:X2}" -f $byte
+            }
+        }
+    }
+    $result ## return
 }
 
 function CreateTypeName ([System.Xml.XmlElement] $xml) {
@@ -61,72 +76,101 @@ function CreateXAObject([System.Xml.XmlElement]$xml) {
 
 	$ret = @{
 		Type       = ""
-		ObjectName = $xml.SelectSingleNode("ToString").InnerText
+		ObjectName = $xml.SelectSingleNode("ToString") | Select-Object -ExpandProperty InnerText -ErrorAction SilentlyContinue
 		RefId      = $xml.RefId
 		xml        = $xml
 	}
 	return $ret
 }
 
-function CreateXAFarm([System.Xml.XmlElement]$xml) {
-	$super = CreateXAObject $xml
-	return @{
+function CreateXAFarm
+{
+    Param
+    (
+        [System.Xml.XmlElement]$xml ,
+        $clixml 
+    )
+	$super = CreateXAObject -xml $xml
+	$result = @{
 		Type          = $super.Type
 		ObjectName    = $super.ObjectName
 		RefId         = $super.RefId
-		FarmName      = $xml.Props.SelectSingleNode("S[@N='FarmName']").InnerText
-		ServerVersion = $xml.Props.SelectSingleNode("Version[@N='ServerVersion']").InnerText
-		MachineName   = $xml.Props.SelectSingleNode("S[@N='MachineName']").InnerText
+		FarmName      = $clixml | Select-Object -ExpandProperty FarmName -ErrorAction SilentlyContinue
+		ServerVersion = $clixml | Select-Object -ExpandProperty ServerVersion -ErrorAction SilentlyContinue
+		MachineName   = $clixml | Select-Object -ExpandProperty MachineName -ErrorAction SilentlyContinue
 	}
+    $result ## return
 }
 
-function CreateXAZone([System.Xml.XmlElement] $xml) {
-	$super = CreateXAObject($xml)
-	return [pscustomobject] @{
-		Type        = $super.Type
-		ObjectName  = $super.ObjectName
-		RefId       = $super.RefId
-		ZoneName    = $xml.Props.SelectSingleNode("S[@N='ZoneName']").InnerText
-		MachineName = $xml.Props.SelectSingleNode("S[@N='MachineName']").InnerText
+function CreateXAZone
+{
+    Param
+    (
+        [System.Xml.XmlElement]$xml ,
+        $clixml 
+    )
+	$super = CreateXAObject -xml $xml
+	$result = [pscustomobject] @{
+		Type          = $super.Type
+		ObjectName    = $super.ObjectName
+		RefId         = $super.RefId
+		ZoneName    = $clixml | Select-Object -ExpandProperty ZoneName -ErrorAction SilentlyContinue
+		MachineName = $clixml | Select-Object -ExpandProperty MachineName -ErrorAction SilentlyContinue
 	}
+    $result ## return
 }
 
-function CreateXAServer ([System.Xml.XmlElement] $xml) {
+function CreateXAServer 
+{
+    Param
+    (
+        [System.Xml.XmlElement]$xml ,
+        $clixml 
+    )
 	$super = CreateXAObject($xml)
 	$obj = @{
 		Type        = $super.Type
 		Name        = $super.ObjectName
 		RefId       = $super.RefId
-		MachineName = $xml.Props.SelectSingleNode("S[@N='MachineName']").InnerText
-		ServerName  = $xml.Props.SelectSingleNode("S[@N='ServerName']").InnerText
-		ServerId    = $xml.Props.SelectSingleNode("S[@N='ServerId']").InnerText
-		FolderPath  = $xml.Props.SelectSingleNode("S[@N='FolderPath']").InnerText
-		ZoneName    = $xml.Props.SelectSingleNode("S[@N='ZoneName']").InnerText
+		MachineName = $clixml | Select-Object -ExpandProperty MachineName -ErrorAction SilentlyContinue
+		ServerName  = $clixml | Select-Object -ExpandProperty ServerName -ErrorAction SilentlyContinue
+		ServerId    = $clixml | Select-Object -ExpandProperty ServerId -ErrorAction SilentlyContinue
+		FolderPath  = $clixml | Select-Object -ExpandProperty FolderPath -ErrorAction SilentlyContinue
+		ZoneName    = $clixml | Select-Object -ExpandProperty ZoneName -ErrorAction SilentlyContinue
+        }
+
+    if( $obj -and [string]::IsNullOrEmpty( $obj.ServerName ) ) {
+        $obj.ServerName = $obj.MachineName
 	}
 	return $obj
 }
 
-function CreateXAApplication ([System.Xml.XmlElement] $xml) {
+function CreateXAApplication {
+    Param
+    (
+        [System.Xml.XmlElement] $xml ,
+        $clixml
+    )
 	$super = CreateXAObject($xml)
-
 	$ret = [PSCustomObject] @{
 		Type                            = $super.Type
-		Name                            = $xml.Props.SelectSingleNode("S[@N='DisplayName']").InnerText
-		Description                     = $xml.Props.SelectSingleNode("S[@N='Description']").InnerText
-		WorkingDirectory                = $xml.Props.SelectSingleNode("S[@N='WorkingDirectory']").InnerText
+		Name                            = $clixml | Select-Object -ExpandProperty DisplayName -ErrorAction SilentlyContinue
+		Description                     = $clixml | Select-Object -ExpandProperty Description -ErrorAction SilentlyContinue
+		WorkingDirectory                = $clixml | Select-Object -ExpandProperty WorkingDirectory -ErrorAction SilentlyContinue
 		RefId                           = $super.RefId
-		FolderPath                      = $xml.Props.SelectSingleNode("S[@N='FolderPath']").InnerText
-		ClientFolder                    = $xml.Props.SelectSingleNode("S[@N='ClientFolder']").InnerText
-		StartMenuFolder                 = $xml.Props.SelectSingleNode("S[@N='StartMenuFolder']").InnerText
-		CommandLineExecutable           = $xml.Props.SelectSingleNode("S[@N='CommandLineExecutable']").InnerText
-		ApplicationType                 = $xml.Props.SelectSingleNode("Obj[@N='ApplicationType']").SelectSingleNode("ToString").InnerText
-		IconData                        = $xml.Props.SelectSingleNode("BA[@N='IconData']").InnerText
-		ApplicationId                   = $xml.Props.SelectSingleNode("S[@N='ApplicationId']").InnerText
-		ContentAddress                  = $xml.Props.SelectSingleNode("S[@N='ContentAddress']").InnerText
-		InstanceLimit                   = [int]$xml.Props.SelectSingleNode("I32[@N='InstanceLimit']").InnerText
-		UserFilter                      = $xml.Props.SelectNodes("Obj[@N='Accounts']/LST/Obj/Props/S[@N='AccountId']").InnerText
-		UserFilterByAccountName         = $xml.Props.SelectNodes("Obj[@N='Accounts']/LST/Obj/Props/S[@N='AccountName']").InnerText
-		ColorDepth                      = $xml.Props.SelectNodes("Obj[@N='ColorDepth']")
+		FolderPath                      = $clixml | Select-Object -ExpandProperty FolderPath -ErrorAction SilentlyContinue
+		ClientFolder                    = $clixml | Select-Object -ExpandProperty ClientFolder -ErrorAction SilentlyContinue
+		StartMenuFolder                 = $clixml | Select-Object -ExpandProperty StartMenuFolder -ErrorAction SilentlyContinue
+		CommandLineExecutable           = $clixml | Select-Object -ExpandProperty CommandLineExecutable -ErrorAction SilentlyContinue
+		ApplicationType                 = $clixml | Select-Object -ExpandProperty ApplicationType -ErrorAction SilentlyContinue
+		IconData                        = $clixml | Select-Object -ExpandProperty IconData -ErrorAction SilentlyContinue
+		ApplicationId                   = $clixml | Select-Object -ExpandProperty ApplicationId -ErrorAction SilentlyContinue
+		ContentAddress                  = $clixml | Select-Object -ExpandProperty ContentAddress -ErrorAction SilentlyContinue
+		WindowType                      = $clixml | Select-Object -ExpandProperty WindowType -ErrorAction SilentlyContinue
+		InstanceLimit                   = [int]($clixml | Select-Object -ExpandProperty InstanceLimit -ErrorAction SilentlyContinue)
+		UserFilter                      = $clixml | Select-Object -ExpandProperty Accounts -ErrorAction SilentlyContinue | Select-Object -ExpandProperty AccountId -ErrorAction SilentlyContinue ## (GetPropertyOrNull $clixml "Accounts.AccountId")
+		UserFilterByAccountName         = $clixml | Select-Object -ExpandProperty Accounts -ErrorAction SilentlyContinue | Select-Object -ExpandProperty AccountId -ErrorAction SilentlyContinue  ## (GetPropertyOrNull $clixml "Accounts.AccountName")
+		ColorDepth                      = $clixml | Select-Object -ExpandProperty ColorDepth -ErrorAction SilentlyContinue
 		Enabled                         = $false
 		Width                           = $null
 		Height                          = $null
@@ -140,22 +184,9 @@ function CreateXAApplication ([System.Xml.XmlElement] $xml) {
 		Extensions                      = $null
 	}
 	
-	if ($ret.ColorDepth -ne $null) {
-		$ret.ColorDepth = $ret.ColorDepth.SelectSingleNode("ToString").InnerText
-	}
-
-	if ($ret.ColorDepth.Count -eq 0) {
-		$ret.ColorDepth = $null
-	}
-
-
-	if ($ret.ApplicationId -eq $null) {
-		$ret.ApplicationId = [guid]::NewGuid()
-	}
-
-	$servers = $xml.Props.SelectNodes("Obj[@N='ServerNames']").LST.S
-	$wgNames = $xml.SelectSingleNode("Props/Obj[@N='WorkerGroupNames']").LST.S
-	$filetypes = $xml.Props.SelectNodes("Obj[@N='FileTypes']/LST/Obj/Props/Obj/LST/S").InnerText
+	$servers = GetPropertyOrNull $clixml "ServerNames"
+	$wgNames = GetPropertyOrNull $clixml "WorkerGroupNames"
+	$filetypes = GetPropertyOrNull $clixml "Extensions"
 
 	if ($filetypes) {
 		[System.Collections.ArrayList] $extensions = $filetypes
@@ -173,32 +204,30 @@ function CreateXAApplication ([System.Xml.XmlElement] $xml) {
 	}
 
 	$tmpBool = $false
-	[bool]::TryParse($xml.Props.SelectSingleNode("B[@N='AddToClientDesktop']").InnerText, [ref] $tmpBool)
+	[bool]::TryParse((GetPropertyOrNull $clixml "AddToClientDesktop"), [ref] $tmpBool) | Out-Null
 	$ret.AddToClientDesktop = $tmpBool
 
-	[bool]::TryParse($xml.Props.SelectSingleNode("B[@N='AddToClientStartMenu']").InnerText, [ref] $tmpBool)
+	[bool]::TryParse((GetPropertyorNull $clixml "AddToClientStartMenu"), [ref] $tmpBool) | Out-Null
 	$ret.AddToClientStartMenu = $tmpBool
 
-	[bool]::TryParse($xml.Props.SelectSingleNode("B[@N='MultipleInstancesPerUserAllowed']").InnerText, [ref] $tmpBool)
+	[bool]::TryParse((GetPropertyOrNull $clixml "MultipleInstancesPerUserAllowed"), [ref] $tmpBool) | Out-Null
 	$ret.MultipleInstancesPerUserAllowed = $tmpBool
 
-	[bool]::TryParse($xml.Props.SelectSingleNode("B[@N='WaitOnPrinterCreation']").InnerText, [ref] $tmpBool)
+	[bool]::TryParse((GetPropertyOrNull $clixml "WaitOnPrinterCreation"), [ref] $tmpBool) | Out-Null
 	$ret.WaitOnPrinterCreation = $tmpBool
 
-	[bool]::TryParse($xml.Props.SelectSingleNode("B[@N='Enabled']").InnerText, [ref] $tmpBool)
+	[bool]::TryParse($clixml.Enabled, [ref] $tmpBool) | Out-Null
 	$ret.Enabled = $tmpBool
 
-	[bool]::TryParse($xml.Props.SelectSingleNode("B[@N='MaximizedOnStartup']").InnerText, [ref] $tmpBool)
+	[bool]::TryParse((GetPropertyOrNull $clixml "MaximizedOnStartup"), [ref] $tmpBool) | Out-Null
 	$ret.MaximizedOnStartup = $tmpBool
 
-	$windowType = $xml.Props.SelectSingleNode("S[@N='WindowType']").InnerText
+	$windowType = GetPropertyOrNull $clixml "WindowType"
 	if ($windowType) {
 		$widthHeight = $windowType.Split("x")
 		$ret.Width = $widthHeight[0]
 		$ret.Height = $widthHeight[1]
 	}
-
-
 
 	if (-not $ret.InstanceLimit -or $ret.InstanceLimit -lt 0) {
 		$ret.InstanceLimit = 0
@@ -211,6 +240,20 @@ function CreateXAApplication ([System.Xml.XmlElement] $xml) {
 	if ($wgNames) {
 		$ret.WorkerGroups += @($wgNames)
 	}
+    
+	#[bool]($myObject.PSobject.Properties.name -match "myPropertyNameToTest")
+	if($null -eq $ret.ApplicationId){
+		$ret.ApplicationId = [guid]::NewGuid()	
+	}
+	# if ( -Not $ret.PSObject.Properties[ 'ApplicationId' ] -or $ret.ApplicationId -eq $null) {
+	# 	## generate the same file name rather than random - names should be unique
+	# 	$ret.ApplicationId = (Get-Hash -textToHash $ret.Name)
+	# }
+	
+	if ( -Not $ret.PSObject.Properties[ 'WindowType' ] -or $ret.WindowType -eq $null) {
+		$ret.WindowType = 'Normal'
+	}
+	
 
 	return $ret
 }
@@ -259,36 +302,40 @@ function GetGroupServers ([string] $group) {
 	return $ret
 }
 
-function CreateXAWorkGroup ([System.Xml.XmlElement] $xml) {
+function CreateXAWorkGroup {
+    Param
+    (
+        [System.Xml.XmlElement] $xml ,
+        $clixml
+    )
 	$super = CreateXAObject($xml)
-
 	$ret = @{
 		Type         = $super.Type
-		Name         = $super.ObjectName
+		Name         = $clixml | Select-Object -ExpandProperty WorkerGroupName -ErrorAction SilentlyContinue
 		RefId        = $super.RefId
 		xml          = $super.xml
-		MachineName  = $xml.Props.SelectSingleNode("S[@N='MachineName']").InnerText
+		MachineName  = $clixml | Select-Object -ExpandProperty MachineName -ErrorAction SilentlyContinue
 		OUs          = @()
 		ServerGroups = @()
 		ServerNames  = @()
 	}
-	$OUs = $xml.SelectSingleNode("Props/Obj[@N='OUs']").LST.S
+	$OUs = $object.OUs
 	if ($OUs) {
 		$ret.OUs = @($OUs)
 	}
 
-	$serverGroups = $xml.SelectSingleNode("Props/Obj[@N='ServerGroups']").LST.S
+	$serverGroups = $object.ServerGroups
 	if ($serverGroups) {
 		$ret.ServerGroups = @($serverGroups)
 	}
 
-	$servers = $xml.Props.SelectSingleNode("Obj[@N='ServerNames']").LST.S
+	$servers = $object.ServerNames
 	if ($servers) {
 		$ret.ServerNames = @($servers)
 	}
-	# else {
-	#     $ret.ServerNames = @($ret.MachineName) # if servernames is empty use machine name instead as a server
-	# }
+	else {
+	     $ret.ServerNames = @($ret.MachineName) # if servernames is empty use machine name instead as a server
+	}
 	return $ret
 }
 
@@ -420,11 +467,12 @@ function ParseZones([string] $xmlPath, [System.Data.DataSet] $table) {
 	Log -type "INFO" -message "Parsing XA zones ..." -fnName "ParseZones"
 	$xml = LoadXML($xmlPath)
 	$zones = @($xml.Objs.ChildNodes)
+    $zonesFromXML = Import-Clixml -Path $xmlPath
 
 	[System.Data.DataTable]$tbl_zone = $table.Tables["tbl_zone"]
 
 	for ($i = 0; $i -lt $zones.Count; $i++) {
-		$zone = CreateXAZone($zones[$i])
+		$zone = CreateXAZone -xml $zones[$i] -clixml $zonesFromXML[$i]
 		$row = $tbl_zone.NewRow()
 		$row.Name = $zone.ZoneName
 		$row.MachineName = $zone.MachineName
@@ -438,10 +486,11 @@ function ParseServers ([string] $xmlPath, [System.Data.DataSet] $db) {
 
 	$xml = LoadXML($xmlPath)
 	$servers = @($xml.Objs.ChildNodes)
+    $serversFromXML = Import-Clixml -Path $xmlPath
 
 	[System.Data.DataTable] $tbl_server = $db.Tables["tbl_server"]
 	for ($i = 0; $i -lt $servers.Count; $i++) {
-		$server = CreateXAServer($servers[$i])
+		$server = CreateXAServer -xml $servers[$i] -clixml $serversFromXML[$i]
 		$row = $tbl_server.NewRow()
 		$row.Name = $server.ServerName
 		$row.ZoneName = $server.ZoneName
@@ -456,12 +505,13 @@ function ParseWorkgroups ([string] $xmlPath, [System.Data.DataSet] $db) {
 
 	$xml = LoadXML($xmlPath)
 	$workgroups = @($xml.Objs.ChildNodes)
+    $workgroupsFromXml = Import-Clixml -Path $xmlPath
 
 	[System.Data.DataTable] $tbl_workgroup = $db.Tables["tbl_workgroup"]
 	[System.Data.DataTable] $tbl_wg_server = $db.Tables["tbl_wg_server"]
 
 	for ($i = 0; $i -lt $workgroups.Count; $i++) {
-		$workgroup = CreateXAWorkGroup ($workgroups[$i])
+		$workgroup = CreateXAWorkGroup -xml $workgroups[$i] -clixml $workgroupsFromXml[$i]
 
 		foreach ($server in $workgroup.ServerNames) {
 			$wgsrv_row = $tbl_wg_server.NewRow()
@@ -596,11 +646,12 @@ function ParseOUs ([string] $xmlPath, [System.Data.DataSet] $db) {
 
 	$xml = LoadXML($xmlPath)
 	$workgroups = @($xml.Objs.ChildNodes)
+    $workgroupsFromXml = Import-Clixml -Path $xmlPath
 
 	[System.Data.DataTable] $tbl_ou = $db.Tables["tbl_ou"]
 
 	for ($i = 0; $i -lt $workgroups.Count; $i++) {
-		$workgroup = CreateXAWorkGroup ($workgroups[$i])
+		$workgroup = CreateXAWorkGroup -xml $workgroups[$i] -clixml $workgroupsFromXml[$i]
 		foreach ($ou in $workgroup.OUs) {
 			if (IsGUID($ou)) {
 				$ou_obj = GetOUByGUID($ou)
@@ -634,11 +685,12 @@ function ParseServerGroups([string] $xmlPath, [System.Data.DataSet] $db) {
 	Log -type "INFO" -message "Parsing Server groups (Active Directory Groups) ..."
 	$xml = LoadXML($xmlPath)
 	$workgroups = @($xml.Objs.ChildNodes)
+    $workgroupsFromXml = Import-Clixml -Path $xmlPath
 
 	[System.Data.DataTable] $tbl_serverGroup = $db.Tables["tbl_serverGroup"]
 
 	for ($i = 0; $i -lt $workgroups.Count; $i++) {
-		$workgroup = CreateXAWorkGroup ($workgroups[$i])
+		$workgroup = CreateXAWorkGroup -xml $workgroups[$i] -clixml $workgroupsFromXml[$i]
 		foreach ($serverGroup in $workgroup.ServerGroups) {
 			$row = $tbl_serverGroup.NewRow()
 			$row.Name = "ADG_$serverGroup"
@@ -704,6 +756,7 @@ function ParseADMachines ([System.Data.DataSet] $db) {
 }
 
 function ExtractFolders([PSCustomObject]$app, [System.Data.DataSet]$db) {
+    if( $null -ne $app -and  $app.PSObject.Properties[ 'FolderPath' ] -and -Not [string]::IsNullOrEmpty( $app.FolderPath ) ) {
 	[System.Collections.ArrayList]$folders = $app.FolderPath.Split('/')
 	$folders.RemoveAt(0) # remove the XenApp root folder.
 
@@ -751,40 +804,45 @@ function ExtractFolders([PSCustomObject]$app, [System.Data.DataSet]$db) {
 			Log -type "INFO" -message "Folder $($row.Name) was already added [expected]"
 		}
 	}
+    }
+    ## TODO what do we do for XenApp 7.x ?
 }
 
 function ParseAppFolders([string] $xmlPath, [System.Data.DataSet] $db) {
 	Log -type "INFO" -message "Parsing Application folders ..." -fnName "ParseAppFolders"
 	$xml = LoadXML($xmlPath)
 	$applications = @($xml.Objs.ChildNodes)
-
+    $applicationsFromXml = Import-Clixml -Path $xmlPath
 	[System.Data.DataTable]$tbl_folder = $db.Tables["tbl_folder"]
 
 	for ($i = 0; $i -lt $applications.Count; $i++) {
-		$app = CreateXAApplication($applications[$i])
+		$app = CreateXAApplication -xml $applications[$i] -clixml $applicationsFromXml[$i]
 		ExtractFolders -app $app -db $db
 	}
 }
 
 function GetParameters ([string] $cle) {
 	if (-not $cle) {
-		return
+		return $null
 	}
 	if ($cle.StartsWith('"')) {
 		$i = $cle.IndexOf('"')
-		$j = $cle.IndexOf('"', ++$i)
-		if ($j -eq $cle.Length - 1) {
-			return
+		$j = $cle.IndexOf('"', $i+1)
+		if ($j -eq ($cle.Length - 1)) {
+			return $null
 		}
-		$cle = $cle.Remove($i, ++$j)
+		$cle = $cle.Remove($i, $j+2)
 		if ($cle.StartsWith(" ")) {
 			$cle = $cle.Remove(0, 1)
+		}
+		if($cle.Contains("'")){
+			$cle = $cle.Replace("'",'')
 		}
 	}
 	else {
 		$j = $cle.IndexOf(' ')
 		if ($j -lt 0) {
-			return
+			return $null
 		}
 		$cle = $cle.Remove(0, ++$j)
 	}
@@ -831,91 +889,133 @@ function ParseApplications ([string] $xmlPath, [System.Data.DataSet]$db) {
 	Log -type "INFO" -message "Parsing applications ..." -fnName "ParseApplications"
 	$xml = LoadXML($xmlPath)
 	$applications = @($xml.Objs.ChildNodes)
+    $applicationsFromXml = Import-Clixml -Path $xmlPath
 
 	$tbl_application = $db.Tables["tbl_application"]
 
 	$dir = $settings.IconPath
-	if (![System.IO.Directory]::Exists($dir)) {
-		[System.IO.Directory]::CreateDirectory($dir) | Out-Null
+	if (! ( Test-Path -Path $dir -PathType Container)) {
+		New-Item -Path $dir -ItemType Directory | Out-Null
 	}
-	$dir = Resolve-Path $dir
+    ## in case in an FS provider path format
+	$dir = (Resolve-Path $dir) -replace '^Microsoft\.PowerShell\.Core\\FileSystem::'
+
 	for ($i = 0; $i -lt $applications.Count; $i++) {
-		$app = CreateXAApplication($applications[$i])
-
-		$parameters = GetParameters -cle $app.CommandLineExecutable
-		$target = GetTarget -cle $app.CommandLineExecutable
-
-		$bytes = [System.Convert]::FromBase64String($app.IconData)
-		$path = "$($settings.IconPath)/$($app.ApplicationId).ico"
-		[System.IO.File]::WriteAllBytes("$dir/$($app.ApplicationId).ico", $bytes)
-		$row = $tbl_application.NewRow()
-		$row.Id = $app.ApplicationId
-		$row.Name = $app.Name
-		$row.Description = $app.Description
-		$row.Width = $app.Width
-		$row.Height = $app.Height
-		$row.Enabled = $app.Enabled
-		$row.Parameters = $parameters
-		$row.ColorDepth = $app.ColorDepth
-		$row.Extensions = $app.Extensions
+		$app = CreateXAApplication -xml $applications[$i] -clixml $applicationsFromXml[ $i ]
 		
-		if ($app.UserFilterByAccountName) {
+		$parameters = GetParameters -cle (GetPropertyOrNull $app "CommandLineExecutable")
+		$target = GetTarget -cle (GetPropertyOrNull $app "CommandLineExecutable")
+
+		$bytes = $null
+		if($app.IconData -is [System.String]){
+			$bytes = [System.Convert]::FromBase64String($app.IconData)
+
+		}else{
+			$bytes = $app.IconData
+		}
+        if( $bytes ) {
+			#$hash = "1A495F7E01F6D5FCA260152C6EF8D3E992648571CEF6D70129C779772E84AC3A"
+			$hash = Get-Hash $bytes
+			$path = "$($settings.IconPath)/$($hash).ico"
+			[System.IO.File]::WriteAllBytes("$dir/$($hash).ico", $bytes)
+        }else{
+			$path = $null
+		}
+		$row = $tbl_application.NewRow()
+		$row.Id = GetPropertyOrNull $app "ApplicationId"
+		$row.Name = GetPropertyOrNull $app "Name"
+		$row.Description = GetPropertyOrNull $app "Description"
+		$row.Width = GetPropertyOrNull $app "Width"
+		$row.Height = GetPropertyOrNull $app "Height"
+		$row.Enabled = GetPropertyOrDBNull $app "Enabled"
+		$row.Parameters = $parameters
+		$row.ColorDepth = GetPropertyOrNull $app "ColorDepth"
+		$row.Extensions = GetPropertyOrNull $app "Extensions"
+		
+		if ( $app.PSObject.Properties[ 'UserFilterByAccountName' ] -and $app.UserFilterByAccountName) {
 			$userFilterAccountNameCSV = [string]::Join(",", $app.UserFilterByAccountName)
 			$row.UserFilterByAccountName = $userFilterAccountNameCSV
 		}
 
-		if ($app.UserFilter) {
+		if ( $app.PSObject.Properties[ 'UserFilter' ] -and $app.UserFilter) {
 			$userFilterCSV = [string]::Join(",", $app.UserFilter)
 			$row.UserFilter = $userFilterCSV
 		}
 		
-		$row.InstanceLimit = $app.InstanceLimit
-		$row.WorkingDirectory = $app.WorkingDirectory
-		$row.AddToClientDesktop = $app.AddToClientDesktop
-		$row.AddToClientStartMenu = $app.AddToClientStartMenu
-		$row.MultipleInstancesPerUserAllowed = $app.MultipleInstancesPerUserAllowed
-		$row.WaitOnPrinterCreation = $app.WaitOnPrinterCreation
-		$row.MaximizedOnStartup = $app.MaximizedOnStartup
-		$row.WindowType = $app.WindowType
-
+		$row.InstanceLimit = GetPropertyOrDBNull $app "InstanceLimit" 
+		$row.WorkingDirectory = GetPropertyOrNull $app "WorkingDirectory"
+		$row.AddToClientDesktop = GetPropertyOrDBNull $app "AddToClientDesktop"
+		$row.AddToClientStartMenu = GetPropertyOrDBNull $app "AddToClientStartMenu"
+		$row.MultipleInstancesPerUserAllowed = GetPropertyOrDBNull $app "MultipleInstancesPerUserAllowed"
+		$row.WaitOnPrinterCreation = GetPropertyOrDBNull $app "WaitOnPrinterCreation"
+		$row.MaximizedOnStartup = GetPropertyOrDBNull $app "MaximizedOnStartup"
+		$row.WindowType = GetPropertyOrDBNull $app "WindowType"	
 		$row.IconPath = $path
-		[System.Collections.ArrayList]$folders = $app.FolderPath.Split('/')
-		$folders.RemoveAt(0)
+		
+		#[System.Collections.ArrayList]$folders = $(if( $app.PSObject.Properties[ 'UserFilterByAccountName' ] -and -Not [string]::IsNullOrEmpty( $app.FolderPath )) { $app.FolderPath.Split('/') } )
+		[System.Collections.ArrayList]$folders = $null
 
-		if ([string]$app.ClientFolder) {
-			if ($folders.Count -eq 0) {
+		$folderpath = GetPropertyOrNull $app "FolderPath"
+		if(![string]::IsNullOrEmpty($folderpath)){
+			[System.Collections.ArrayList]$folders = $folderpath.Split('/')
+		}
+
+		if( $folders -and $folders.Count -gt 0 ) {
+		$folders.RemoveAt(0)
+        }
+
+		if ([string](GetPropertyOrNull $app "ClientFolder")) {
+			if (-Not $folders -or $folders.Count -eq 0) {
 				$row.FolderPath = $app.ClientFolder
 			}
 			else {
 				$row.FolderPath = [string]::Join("/", @([string]::Join("/", $folders.ToArray()), $app.ClientFolder))
 			}
 		}
-		else {
+		elseif( $folders ) {
 			$row.FolderPath = [string]::Join("/", $folders.ToArray())
 		}
 
-		if ($app.ApplicationType -eq "Content") {
-			$target = $app.ContentAddress
+		if ((GetPropertyOrNull $app "ApplicationType") -eq "Content") {
+			$target = $app[$app.length - 1].ContentAddress
 		}
 		$row.Target = $target
-		$row.Type = $app.ApplicationType
+		$row.Type = GetPropertyOrNull $app "ApplicationType"
 
 		$tbl_application.Rows.Add($row)
 	}
 	Log -type "INFO" -message "Parseing applications completed."
 }
 
+function GetPropertyOrNull([object]$object, [string]$property) {
+	if($object.PSobject.Properties.name -match $property) {
+		return $object.$property
+	} Else {
+		return $null
+	}
+}
+
+function GetPropertyOrDBNull([object]$object, [string]$property) {
+	$ret = GetPropertyOrNull $object $property
+	if($null -eq $ret){
+		return [DBNull]::Value
+	}else{
+		return $ret
+	}
+}
+
 function ParseAppServers ([string] $xmlPath, [System.Data.DataSet]$db) {
 	Log -type "INFO" -message "Parsing application servers ..." -fnName "ParseAppServers"
 	$xml = LoadXML($xmlPath)
 	$applications = @($xml.Objs.ChildNodes)
+    $applicationsFromXml = Import-Clixml -Path $xmlPath
 
 	$tbl_app_server = $db.Tables["tbl_app_server"]
 
 	for ($i = 0; $i -lt $applications.Count; $i++) {
-		$app = CreateXAApplication($applications[$i])
+		$app = CreateXAApplication -xml $applications[$i] -clixml $applicationsFromXml[$i]
 
-		foreach ($serverName in $app.Servers) {
+		foreach ($serverName in (GetPropertyOrNull $app "Servers")) {
 			$row = $tbl_app_server.NewRow()
 			$row.AppId = $app.ApplicationId
 			$row.AppName = $app.Name
@@ -931,13 +1031,14 @@ function ParseAppWorkgroup ([string] $xmlPath, [System.Data.DataSet] $db) {
 
 	$xml = LoadXML($xmlPath)
 	$applications = @($xml.Objs.ChildNodes)
+    $applicationsFromXml = Import-Clixml -Path $xmlPath
 
 	$tbl_app_workgroup = $db.Tables["tbl_app_workgroup"]
 
 	for ($i = 0; $i -lt $applications.Count; $i++) {
-		$app = CreateXAApplication($applications[$i])
+		$app = CreateXAApplication -xml $applications[$i] -clixml $applicationsFromXml[$i]
 
-		foreach ($workgroup in $app.WorkerGroups) {
+		foreach ($workgroup in (GetPropertyOrNull $app "WorkerGroups")) {
 			$row = $tbl_app_workgroup.NewRow()
 			$row.AppId = $app.ApplicationId
 			$row.AppName = $app.Name
@@ -949,60 +1050,52 @@ function ParseAppWorkgroup ([string] $xmlPath, [System.Data.DataSet] $db) {
 }
 
 function ParseXMLtoDB ([string] $zonesXmlPath, [string] $serversXmlPath, [string] $workgroupXmlPath, [string] $applicationXmlPath, [string] $farmXmlPath = "") {
-
-	if (![System.IO.File]::Exists($zonesXmlPath)) {
-		throw "File '$($zonesXmlPath)' not found"
-	}
-
-	if (![System.IO.File]::Exists($serversXmlPath)) {
-		throw "File '$($serversXmlPath)' not found"
-	}
-
-	if (![System.IO.File]::Exists($workgroupXmlPath)) {
-		throw "File '$($workgroupXmlPath)' not found"
-	}
-
-	if (![System.IO.File]::Exists($applicationXmlPath)) {
-		throw "File '$($applicationXmlPath)' not found"
-	}
-
 	if ($farmXmlPath) {
 		$xml = LoadXML($farmXmlPath)
+        $farmFromXML = Import-Clixml -Path $farmXmlPath
 		$farms = @($xml.Objs.ChildNodes)
-		$settings.FarmInfo = CreateXAFarm $farms[0]
+		$settings.FarmInfo = CreateXAFarm -xml $farms[0] -clixml $farmFromXML
 	}
 
 	[System.Data.DataSet]$Database = InitializeDatabase
 
-	Log -type "INFO" -message "PARSING ZONES"
-	ParseZones  $zonesXmlPath $Database
+	if ([System.IO.File]::Exists($zonesXmlPath)) {
+		Log -type "INFO" -message "PARSING ZONES"
+		ParseZones  $zonesXmlPath $Database
+	}
 
-	Log -type "INFO" -message "PARSING SERVERS"
-	ParseServers $serversXmlPath $Database
+	if ([System.IO.File]::Exists($serversXmlPath)) {
+		Log -type "INFO" -message "PARSING SERVERS"
+		ParseServers $serversXmlPath $Database
+	}
 
-	Log -type "INFO" -message "PARSING Workergroups"
-	ParseWorkgroups $workgroupXmlPath $Database
-
-	Log -type "INFO" -message "PARSING OUs"
-	ParseOUs $workgroupXmlPath $Database
-
-	Log -type "INFO" -message "PARSING Server groups"
-	ParseServerGroups $workgroupXmlPath $Database
+	if ([System.IO.File]::Exists($workgroupXmlPath)) {
+		Log -type "INFO" -message "PARSING Workergroups"
+		ParseWorkgroups $workgroupXmlPath $Database
+	
+		Log -type "INFO" -message "PARSING OUs"
+		ParseOUs $workgroupXmlPath $Database
+	
+		Log -type "INFO" -message "PARSING Server groups"
+		ParseServerGroups $workgroupXmlPath $Database
+	}
 
 	Log -type "INFO" -message "PARSING AD Machines"
 	ParseADMachines $Database
 
-	Log -type "INFO" -message "PARSING Application Folders"
-	ParseAppFolders $applicationXmlPath $Database
+	if ([System.IO.File]::Exists($applicationXmlPath)) {
+		Log -type "INFO" -message "PARSING Application Folders"
+		ParseAppFolders $applicationXmlPath $Database
 
-	Log -type "INFO" -message "PARSING Applications"
-	ParseApplications $applicationXmlPath $Database
+		Log -type "INFO" -message "PARSING Applications"
+		ParseApplications $applicationXmlPath $Database
 
-	Log -type "INFO" -message "PARSING Application servers"
-	ParseAppServers $applicationXmlPath $Database
+		Log -type "INFO" -message "PARSING Application servers"
+		ParseAppServers $applicationXmlPath $Database
 
-	Log -type "INFO" -message "PARSING Applications"
-	ParseAppWorkgroup $applicationXmlPath $Database
+		Log -type "INFO" -message "PARSING Applications"
+		ParseAppWorkgroup $applicationXmlPath $Database
+	}
 
 	Log -type "INFO" -message "Workgroup server cleanup."
 	WorkgroupServerCleanup $Database
@@ -1011,11 +1104,11 @@ function ParseXMLtoDB ([string] $zonesXmlPath, [string] $serversXmlPath, [string
 }
 
 function InitializeScript ([scriptblock]$appendToMain) {
-	if ([System.IO.File]::Exists("./MigrationScript.ps1")) {
-		[System.IO.File]::Delete("./MigrationScript.ps1")
+	if ([System.IO.File]::Exists("./ImportToRAS.ps1")) {
+		[System.IO.File]::Delete("./ImportToRAS.ps1")
 	}
 
-	$scriptPath = "./MigrationScript.ps1"
+	$scriptPath = "./ImportToRAS.ps1"
 	$date = Get-Date
 	WriteScript @"
 <#
@@ -1042,7 +1135,7 @@ RAS username
 RAS password
 
 .EXAMPLE
-./MigrationScript.ps1
+./ImportToRas.ps1
 
 .NOTES
 Be aware that any removal of commands, will require the user to search for any missing reference of variables.
@@ -1185,6 +1278,7 @@ function WriteToScript ([string]$command, [switch] $useVar, [int]$tabs = 1) {
 
 	[scriptblock]$script = [scriptblock]::Create($command)
 	$spaceIndex = $command.IndexOf(' ')
+    $varname = $null
 
 	if ($spaceIndex -ne -1) {
 		$cmdLetString = $command.Substring(0, $spaceIndex)
@@ -1313,8 +1407,8 @@ function PublishRDSApp ($app, $from, $publishSource, $parentFolder) {
 		$windowType = "Maximized"
 	}
 
-	WriteToScript "Set-RASPubRDSApp -Id $res -CreateShortcutOnDesktop `$$($app.AddToClientDesktop)  -InheritShorcutDefaultSettings `$false -CreateShortcutInStartFolder `$$($app.AddToClientStartMenu) -OneInstancePerUser `$$($app.MultipleInstancesPerUserAllowed) -InheritLicenseDefaultSettings `$false -ConCurrentLicenses $($app.InstanceLimit) -InheritDisplayDefaultSettings `$false -WaitForPrinters `$$($app.WaitOnPrinterCreation) -EnabledMode `Enabled -StartIn '$($app.WorkingDirectory)' -Parameters '$($app.Parameters)' -WinType $windowType"
-	$features16_5 = "Set-RASPubRDSApp -id $res -Icon '$($app.IconPath)'"
+	WriteToScript "Set-RASPubRDSApp -Id $res -CreateShortcutOnDesktop `$$($app.AddToClientDesktop)  -InheritShortcutDefaultSettings `$false -CreateShortcutInStartFolder `$$($app.AddToClientStartMenu) -OneInstancePerUser `$$($app.MultipleInstancesPerUserAllowed) -InheritLicenseDefaultSettings `$false -ConCurrentLicenses $($app.InstanceLimit) -InheritDisplayDefaultSettings `$false -WaitForPrinters `$$($app.WaitOnPrinterCreation) -EnabledMode `Enabled -StartIn '$($app.WorkingDirectory)' -Parameters '$($app.Parameters)' -WinType $windowType"
+	$features16_5 = "Set-RASPubRDSApp -id $res -Icon '$($app.IconPath -replace '^Microsoft\.PowerShell\.Core\\FileSystem::')'"
 	if ($app.ColorDepth -ne [System.DBNull]::Value -and $app.ColorDepth -ne '') {
 		$features16_5 += " -ColorDepth '$($app.ColorDepth)'"
 	}
@@ -1360,7 +1454,7 @@ function PublishRDSDesktop ($app, $from, $publishSource, $parentFolder) {
 		}
 	}
 
-	WriteToScript "Set-RASPubRDSDesktop -Id $($res) -CreateShortcutOnDesktop `$$($app.AddToClientDesktop) -InheritShorcutDefaultSettings `$false -CreateShortcutInStartUpFolder `$$($app.AddToClientStartMenu) -Width $($app.Width) -Height $($app.Height) -DesktopSize Custom -EnabledMode `Enabled"
+	WriteToScript "Set-RASPubRDSDesktop -Id $($res) -CreateShortcutOnDesktop `$$($app.AddToClientDesktop) -InheritShortcutDefaultSettings `$false -CreateShortcutInStartUpFolder `$$($app.AddToClientStartMenu) -Width $($app.Width) -Height $($app.Height) -DesktopSize Custom -EnabledMode `Enabled"
 	return $res
 }
 
@@ -1403,9 +1497,10 @@ function AddPubItemUserFilter ($userFilter, $rdsApp, $userFilterAccountNames = $
 }
 
 function PublishPubItem ($app, $from, $publishSource, $parentFolder) {
-	switch ($app.Type) {
-		"ServerInstalled" {
-			if ($publishSource.Count -eq 0) {
+    $res = $null
+	switch -regex ($app.Type) {
+		"ServerInstalled|HostedOnDesktop" {
+			if ( $null -eq $publishSource -or $publishSource.Count -eq 0) {
 				$res = PublishRDSApp -app $app -from ALL -parentFolder $parentFolder
 			}
 			else {
@@ -1413,7 +1508,7 @@ function PublishPubItem ($app, $from, $publishSource, $parentFolder) {
 			}
 		}
 		"ServerDesktop" {
-			if ($publishSource.Count -eq 0) {
+			if ( $null -eq $publishSource -or $publishSource.Count -eq 0) {
 				$res = PublishRDSDesktop -app $app -from ALL -publishSource $publishSource -parentFolder $parentFolder
 			}
 			else {
@@ -1440,7 +1535,7 @@ function ExtractRelatedApplicationGroups ($app) {
 		# try {
 		$res = $tbl_wg_server.Select("[WorkgroupName] like '$($group.WorkgroupName)'")
 		if ($res -and $res.Count -gt 0) {
-			$rdsGroup = WriteToScript "Get-RDSGroup -Name '$($group.WorkgroupName)'" -useVar
+			$rdsGroup = WriteToScript "Get-RASRDSGroup -Name '$($group.WorkgroupName)'" -useVar
 			$RDSGRoups += $rdsGroup
 		}
 		# }
@@ -1452,7 +1547,7 @@ function ExtractRelatedApplicationGroups ($app) {
 		$ADGroups = $tbl_serverGroup.Select("[WorkgroupName] like '$($group.WorkgroupName)'")
 		foreach ($adgroup in $ADGroups) {
 			# try {
-			$rdsGroup = WriteToScript "Get-RDSGroup -Name '$($adgroup.Name)'" -useVar
+			$rdsGroup = WriteToScript "Get-RASRDSGroup -Name '$($adgroup.Name)'" -useVar
 			# $RDSGRoups += GetVarNameFromCmdlet "Get-RDSGroup"
 			$RDSGRoups += $rdsGroup
 			# }
@@ -1469,7 +1564,7 @@ function ExtractRelatedApplicationGroups ($app) {
 					$name = $ou.GUID
 				}
 
-				$rdsGroup = WriteToScript "Get-RDSGroup -Name '$name'" -useVar
+				$rdsGroup = WriteToScript "Get-RASRDSGroup -Name '$name'" -useVar
 				$RDSGRoups += $rdsGroup
 			}
 			catch {
@@ -1487,7 +1582,7 @@ function ExtractRelatedApplicationServers ($app) {
 	$RDSServers = @()
 	foreach ($server in $app_servers) {
 		try {
-			$rds = WriteToScript "Get-RDS -Server '$($server.ServerName)'" -useVar
+			$rds = WriteToScript "Get-RASRDS -Server '$($server.ServerName)'" -useVar
 			$RDSServers += $rds
 		}
 		catch {
@@ -1507,13 +1602,14 @@ function MigrateApplications([System.Data.DataSet] $db) {
 		$RDSGroups = ExtractRelatedApplicationGroups -app $app
 		$RDSServers = ExtractRelatedApplicationServers -app $app
 		try {
+            $res = $null
 			$parentFolder = $null
 			if ($app.RASFolderID -ne 0 -and $app.RASFolderID -ne [DBnull]::Value) {
-				$parentFolder = WriteToScript "Get-PubFolder -Id $($app.RASFolderID)" -useVar
+				$parentFolder = WriteToScript "Get-RASPubFolder -Id $($app.RASFolderID)" -useVar
 			}
 
 			# if application is published from servers AND groups
-			if (($RDSServers.Count -gt 0 -and $RDSGroups.Count -gt 0) -or $RDSGroups.Count -gt 0) {
+			if ( $RDSGroups -and ( ($RDSServers -and $RDSServers.Count -gt 0 -and $RDSGroups.Count -gt 0) -or $RDSGroups.Count -gt 0)) {
 				Log -type "INFO" -message "Publishing application $($app.Name) from groups"
 				Log -type "INFO" -message "RDSGroups.Count : $($RDSGroups.Count)."
 				$res = PublishPubItem -app $app -from Group -publishSource $RDSGroups -parentFolder $parentFolder
@@ -1521,17 +1617,22 @@ function MigrateApplications([System.Data.DataSet] $db) {
 			}
 			else {
 				Log -type "INFO" -message "Publishing application $($app.Name) from servers."
-				Log -type "INFO" -message "RDSServers.Count : $($RDSServers.Count)."
+				Log -type "INFO" -message "RDSServers.Count : $(if( $RDSServers ) { $RDSServers.Count } else { 0 })."
 
 				$res = PublishPubItem -app $app -from Server -publishSource $RDSServers -parentFolder $parentFolder
 				$app.RASId = $res
 			}
+            if( $res ) {
 			AddPubItemUserFilter -userFilter $app.UserFilter -rdsApp $res -userFilterAccountNames $app.UserFilterByAccountName
+            } else {
+                Log -type "WARNING" -message "Failed to publish application $($app.Name) of type $($app.Type)."
+            }
+
 		}
 		catch {
 			Log -type "ERROR" -message "Error occured during migration of applications" -exception $_.Exception
 			# Write-Host $_.Exception.StackTrace
-			throw
+			throw ## TODO should this be a fatal error ?
 		}
 	}
 	Log -type "INFO" -message "Applications migrated!"
@@ -1543,15 +1644,18 @@ function MigrateSites([System.Data.DataSet] $db) {
 	WriteComment "SITES MIGRATION COMMANDS START"
 	# $tbl_server = $db.Tables["tbl_server"]
 	try {
-		$rasSite = WriteToScript "Get-Site -Id 1" -useVar
+		$rasSite = WriteToScript "Get-RASSite -Id 1" -useVar
 		# Write-HOst $rasSite.Name, "ASDASDASD"
 	}
 	catch {
 		Log -type "ERROR" -message "Failed to get RAS site." -exception $_.Exception
 		return
 	}
-
-	WriteToScript "Set-Site $rasSite -NewName '$($tbl_zone.Rows[0].Name)'"
+	if(!$tbl_zone.Rows){
+		if($($tbl_zone.Rows[0].Name)){
+			WriteToScript "Set-Site $rasSite -NewName '$($tbl_zone.Rows[0].Name)'"
+		}
+	}
 
 	foreach ($zone in $tbl_zone) {
 		# $server = $tbl_server.Select("ZoneName = '$($zone.Name)'")

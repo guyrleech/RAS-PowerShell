@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-Utilities used in CitrixMigrate.ps1
+Utilities used in PrepareImport.ps1
 
 .DESCRIPTION
 This is a utility script which contains all the OU/AD resolution functions,
-Table creation, and Logs. Without this script CitrixMigrate and CitrixMigrationTests.ps1
+Table creation, and Logs. Without this script PrepareImport
 will not work
 
 .EXAMPLE
@@ -95,6 +95,7 @@ function Log ([string] $type, [string] $message, $testInfo = $null, $testStatus 
 
 function LoadXML ([string] $path) {
 	[xml] $data = New-Object xml
+    $xmlReader = $null
 	try {
 		$path = Resolve-Path $path
 		Log -type "INFO" -message "Reading XML from $($path) ..."
@@ -106,9 +107,11 @@ function LoadXML ([string] $path) {
 	}
 	catch {
 		Log -type "ERROR" -message "Failed to get XML data! $($_)"
-		Log -type "INFO" -message "Closing XMLReader stream and disposing ..."
-		$xmlReader.Close()
-		$xmlReader.Dispose()
+        if( $null -ne $xmlReader ) {
+		    Log -type "INFO" -message "Closing XMLReader stream and disposing ..."
+		    $xmlReader.Close()
+		    $xmlReader.Dispose()
+        }
 		Log -type "INFO" -message "Done."
 		throw
 	}
@@ -156,7 +159,7 @@ function XASettingsExport () {
 	}
 }
 
-function ImportPSAdmin () {
+function ImportRASAdmin () {
 
 	$PSAdminModule = "RASAdmin"
 	if($(Get-Module -ListAvailable).Name.Contains("PSAdmin"))
@@ -179,7 +182,7 @@ function ImportPSAdmin () {
 }
 
 function CreateRASSession ([string]$server, [string] $username, [securestring]$password) {
-	if (-not (ImportPSAdmin)) {
+	if (-not (ImportRASAdmin)) {
 		return $false
 	}
 
